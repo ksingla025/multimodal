@@ -1,0 +1,431 @@
+#!/usr/bin/python
+
+'''author : karan singla'''
+
+import os,sys,glob,re,pdb	
+import numpy as np
+from subprocess import call
+import _pickle as cPickle
+
+#from pyAudioAnalysis import audioBasicIO
+#from pyAudioAnalysis import audioFeatureExtraction
+## AAA data utilities ###
+
+def label2dic(filename):
+	
+	dic = {}
+	lines = open(filename,"r").readlines()
+	for i in range(0,len(lines)):
+		tokens = lines[i].strip().split("\t")
+		dic[tokens[0]] = tokens[1:]
+
+	return dic
+
+#---------------- word level data creator ---------------------------#
+'''
+use the clean label files which have this structure
+'''
+def labelinfofile2encoderdata(data_folder,out_file):
+
+	data = []
+	data_len = []
+	out_file = open(out_file,'w')
+	files = glob.glob(data_folder+"/*")
+	for file in files:
+		file = cPickle.load(open(file,'rb'))
+		for key in file.keys():
+			for uttnum in file[key].keys():
+				audio_inf = file[key][uttnum]['audio_inf'][:file[key][uttnum]['sentlen']].tolist()
+				data_len = file[key][uttnum]['audio_wordlen'][:file[key][uttnum]['sentlen']]
+				data_len = [str(x) for x in data_len]
+				for i in range(0,len(audio_inf)):
+					audio_wrd = [','.join([str(y) for y in x]) for x in audio_inf[i]]
+					audio_wrd = ','.join(audio_wrd)
+#					print(len(audio_wrd.split(",")))
+#					out_file.write(audio_wrd+"\n")
+
+					
+					out_file.write(audio_wrd+","+data_len[i]+"\n")
+
+
+#----------- clean alignment files/replace time with framenumbers -----------#
+def alignfolder2frame(align_folder,out_folder,frame_step=25):
+
+	align_folders = glob.glob(align_folder+"/*")
+	for file_folder in align_folders:
+		file_id = os.path.basename(file_folder)
+		align_file = file_folder+"/ali.label"
+		out_file = out_folder+"/"+file_id+".align"
+		alignfile2frames(filename=align_file, out_file=out_file, frame_step=frame_step)
+
+
+def alignfile2frames(filename, out_file, frame_step=25):
+
+	''' 
+	1. replace time with frame-numbers
+	'''
+	print(filename)
+	prev_line1 = -9999
+	utt_count = 0
+	out_file = open(out_file,'w')
+	lines = open(filename,"r").readlines()
+	for i in range(0,len(lines)):
+		line = lines[i].strip().split()
+		if line[2] != 'U':
+			# convert time to frames
+			line[0] = int(float(line[0])*1000/frame_step)
+			if line[0] == prev_line1:
+				line[0] = line[0] + 1
+			line[1] = int(float(line[1])*1000/frame_step)
+			prev_line1 = line[1]
+
+			line[0] = str(line[0])
+			line[1] = str(line[1])
+			line = " ".join(line)
+			out_file.write(line+"\n")
+		else:
+			utt_count = utt_count + 1
+			out_file.write("----------uttnumber_"+str(utt_count)+"_----------\n")
+
+	out_file.close()
+
+
+#------------ add audio features to alignment files -----------#
+def addaudiofeature2align(clean_align,audio_feature_file,out_folder,sentlen=50,wordlen=50,features=34):
+
+	data_utt_audio = {}
+	audio_features = pickle.load(open(audio_feature_file,'r'))
+	for file_id in list(audio_features.keys()):
+		file_features = audio_features[file_id].transpose((1,0))
+		align_fname = clean_align+"/"+file_id+".align"
+		align_file = open(align_fname,'r').readlines()
+
+		out_fname = out_folder+"/"+file_id+".algin.audio"
+		out_file = open(out_fname,'w')
+
+		data_utt_audio[file_id] = {}
+		audio_feats = []
+		text = []
+		for i in range(0,len(align_file)):
+			#zero array according to size we want
+			zeros = np.zeros(wordlen*features).reshape((wordlen,features))
+			if "----------uttnumber" in align_file[i]:
+				if i != 0:
+					data_utt_audio[file_id]['text'] = text
+					zeros_utt = np.zeros(sentlen*wordlen*features).reshape((sentlen, wordlen,features))
+					audio_feats = np.array(audio_feats)
+					zeros_utt[:audio_feats.shape[0], :audio_feats.shape[1],:audio_feats.shape[2]] = audio_feats
+					data_utt_audio[file_id]['audio_feat'] = zeros_utt
+
+					audio_feats = []
+					text = []
+			else:
+				sframe,eframe,role,word = align_file[i].strip().split()
+				feats = file_features[int(sframe):int(eframe)]
+
+				zeros[:inser.shape[0], :inser.shape[1]] = feats
+				audio_feats.append(zeros)
+				text.append(word)
+	return data_utt_audio
+
+
+#-------------- clean label files according to alignment files-------------#
+
+def cleanlabelfile(clean_alignments, label_file, out_folder,audio_feature_folder,word2index,sentlen=50,
+	wordlen=70,features=34):
+
+	label_dic = label2dic(filename=label_file)
+	dictionary = cPickle.load(open(word2index,'rb'))
+	print("dictionary loaded")
+
+	audio_features_files = glob.glob(audio_feature_folder+"*")
+
+	data = {}
+	count = 0
+	sample_count = 0
+	word_len = []
+	sen_len = []
+	print("Files original",len(list(label_dic.keys())))
+	all_align_files = glob.glob(clean_alignments+"*")
+	hh = ['HMCBI_1059']
+
+	for filename in audio_features_files:
+		file_id = os.path.basename(filename).split(".")[0]
+		print(file_id)
+		data[file_id] = {}
+		align_fname = clean_alignments+file_id+".align"
+		if align_fname not in all_align_files:
+			print(file_id+" not in align files")
+			del data[file_id]
+		elif file_id not in list(label_dic.keys()):
+			print(file_id+" not in label_dic")
+		else:
+#			try:
+				audio_features = cPickle.load(open(filename,'rb'))
+				file_features = audio_features.transpose((1,0))
+				align_file = open(align_fname,'r').readlines()
+				text = []
+				word_len = []
+				zeros = np.zeros(wordlen*features).reshape((wordlen,features))
+				audio_feats = []
+				for i in range(0,len(align_file)):
+					if "----------uttnumber" in align_file[i]:
+
+					
+						if i !=0:
+
+							if turn_number in list(label_dic[file_id].keys()):
+								utt_coder = list(label_dic[file_id][turn_number].keys())[0]
+								utt_dic = label_dic[file_id][turn_number][utt_coder]
+#								print "UTT_DIC",utt_dic
+								for utt_id in list(utt_dic.keys()):
+									utt_text = utt_dic[utt_id].split(" ||| ")[2].split()
+									if utt_text == text[:len(utt_text)]:
+									
+										zeros_utt = np.zeros(sentlen*wordlen*features).reshape((sentlen, wordlen,features))
+										text_turn = utt_text
+										if len(text_turn) > sentlen:
+											text_turn = text_turn[:sentlen]
+
+										#replace words in text_turn with dictionary indexes
+										for j in range(0,len(text_turn)):
+											if text_turn[j] in dictionary:
+												text_turn[j] = dictionary[text_turn[j]]
+											else:
+												text_turn[j] = 0
+
+										audio_feats_turn = audio_feats[:len(utt_text)]
+										if len(audio_feats_turn) > sentlen:
+											audio_feats_turn = audio_feats_turn[:sentlen]
+
+										audio_feats_turn = np.array(audio_feats_turn)
+#										print "audio_feats_len",len(audio_feats_turn)
+
+										zeros_utt[:audio_feats_turn.shape[0], :audio_feats_turn.shape[1],:audio_feats_turn.shape[2]] = audio_feats_turn
+									
+										text = text[len(utt_text):]
+										audio_feats = audio_feats[len(utt_text):]
+
+										sen_len.append(len(utt_text))
+										data[file_id][turn_number] = {}
+#										print "writing audio data ))"
+										sample_count = sample_count + 1
+										label, role, text = utt_dic[utt_id].split(" ||| ")	
+										data[file_id][turn_number]['label'] = label
+										data[file_id][turn_number]['role'] = role
+										data[file_id][turn_number]['sentlen'] = len(text_turn)
+										data[file_id][turn_number]['text'] = pad(text_turn,content=0,width=sentlen)
+										data[file_id][turn_number]['audio_inf'] = zeros_utt
+										data[file_id][turn_number]['audio_wordlen'] = pad(word_len, content=0, width=sentlen)
+							else:
+								print("\tturn not found",turn_number)
+
+#						print("align line",align_file[i]),
+						turn_number = int(align_file[i].split("_")[1])
+						text = []
+						audio_feats = []
+						word_len = []
+						zeros = np.zeros(wordlen*features).reshape((wordlen,features))
+
+					elif i == (len(align_file)-1):
+						if turn_number in list(label_dic[file_id].keys()):
+							utt_coder = list(label_dic[file_id][turn_number].keys())[0]
+							utt_dic = label_dic[file_id][turn_number][utt_coder]
+							for utt_id in list(utt_dic.keys()):
+								utt_text = utt_dic[utt_id].split(" ||| ")[2].split()
+								if utt_text == text[:len(utt_text)]:
+									
+										zeros_utt = np.zeros(sentlen*wordlen*features).reshape((sentlen, wordlen,features))
+										text_turn = utt_text
+										if len(text_turn) > sentlen:
+											text_turn = text_turn[:sentlen]
+
+										#replace words in text_turn with dictionary indexes
+										for j in range(0,len(text_turn)):
+											if text_turn[j] in dictionary:
+												text_turn[j] = dictionary[text_turn[j]]
+											else:
+												text_turn[j] = 0
+
+										audio_feats_turn = audio_feats[:len(utt_text)]
+										if len(audio_feats_turn) > sentlen:
+											audio_feats_turn = audio_feats_turn[:sentlen]
+
+										audio_feats_turn = np.array(audio_feats_turn)
+#										print "audio_feats_len",len(audio_feats_turn)
+
+										zeros_utt[:audio_feats_turn.shape[0], :audio_feats_turn.shape[1],:audio_feats_turn.shape[2]] = audio_feats_turn
+									
+										text = text[len(utt_text):]
+										audio_feats = audio_feats[len(utt_text):]
+
+										sen_len.append(len(utt_text))
+										data[file_id][turn_number] = {}
+#										print "writing audio data ))"
+										sample_count = sample_count + 1
+										label, role, text = utt_dic[utt_id].split(" ||| ")	
+										data[file_id][turn_number]['label'] = label
+										data[file_id][turn_number]['role'] = role
+										data[file_id][turn_number]['sentlen'] = len(text_turn)
+										data[file_id][turn_number]['text'] = pad(text_turn,content=0,width=sentlen)
+										data[file_id][turn_number]['audio_inf'] = zeros_utt
+										data[file_id][turn_number]['audio_wordlen'] = pad(word_len, content=0, width=sentlen)
+										
+						else:
+							print("\tturn not found",turn_number)
+						text = []
+						audio_feats = []
+						word_len = []
+						zeros = np.zeros(wordlen*features).reshape((wordlen,features))
+
+						cPickle.dump(data,open(out_folder+file_id+".align.word.p",'wb'))
+						data = {}
+					else:
+#					print align_file[i].strip().split()
+						sframe,eframe,role,word = align_file[i].strip().split()
+						word_len.append(int(eframe)-int(sframe))
+
+						if (int(eframe)-int(sframe)) > wordlen:
+							sframe = int(eframe) + wordlen
+						feats = file_features[int(sframe):int(eframe)]
+						feats = np.array(feats)
+#						print "feats",feats
+						zeros[:feats.shape[0], :feats.shape[1]] = feats
+						audio_feats.append(zeros)						
+						text.append(word)
+
+						zeros = np.zeros(wordlen*features).reshape((wordlen,features))
+#			except Exception as e:
+#				pdb.set_trace()
+#				print("Error")
+#				if len(data[file_id].keys()) == 0:
+#					del data[file_id]
+#					print "cryy_more"
+#				else:
+#					print "recovered",len(data[file_id].keys())
+#				continue
+
+#			if len(data[file_id].keys()) != 0:
+#				cPickle.dump(data,open(out_folder+file_id+".label.audio.p",'wb'))
+#				data = {}
+	
+	print(sample_count)
+	print("\n\n",word_len)
+	print("\n\n",sen_len)
+
+def label2dic(filename):
+	'''
+	remove uttrances that are not there in the labels file
+	'''
+
+	lines = open(filename,'r').readlines()
+	out_data = {}
+	for i in range(0,len(lines)):
+		line = lines[i].strip().split("\t")
+#		print line
+		file_id = line[0]
+		utt_number = int(line[1])
+		coder_id = line[2]
+		turn_number = int(line[4])
+		if file_id not in list(out_data.keys()):
+			out_data[file_id] = {}
+		if utt_number not in list(out_data[file_id].keys()):
+			out_data[file_id][utt_number] = {}
+
+		if coder_id not in list(out_data[file_id][utt_number].keys()):
+			out_data[file_id][utt_number][coder_id] = {}
+
+		text = normline(line[-1])[0]
+		out_data[file_id][utt_number][coder_id][turn_number] = line[5] + " ||| " + line[6] + " ||| " + text
+
+	return out_data
+
+def create_dictionary(filename, out_file, min_count=5):
+
+	print("====creating dictionary====")
+	from collections import Counter
+
+	all_text = []
+	lines = open(filename,'r').readlines()
+	
+	print("reading and cleaning data")
+	for i in range(0,len(lines)):
+#		print i
+		line = lines[i].strip().split("\t")
+		text = normline(line[-1])[0].encode('utf-8').decode('utf-8', 'ignore').split()
+		for word in text:
+			all_text.append(word)
+
+	print("total words", len(all_text))
+	print("creating wordcount")
+	wordcount = Counter(all_text)
+
+	print("Total Unique words", len(list(wordcount.keys())))
+	wordcount = {k:v for k, v in list(wordcount.items()) if v > min_count}
+	print("Total words after removing words having less than "+str(min_count+1)+" frequency",len(list(wordcount.keys())))
+	dictionary = dict() # {word : index}
+	for word in wordcount:
+		dictionary[word] = len(dictionary)
+
+	cPickle.dump(dictionary,open(out_file,"wb"))
+
+
+
+
+#------------------- string clean operation ---------------------#
+def _nvv(match):
+	if 'laugh' in match.group(1).lower():
+		return ' [laughter] '
+	else:
+		return ' [noise] '
+
+def normline(rawtxt):
+	"""
+	Normalize the text into standard format
+	"""
+	txt = re.sub(r'\[(.*?)\]', _nvv, rawtxt) # remove unknown words
+	txt = re.sub(r'[(),.?;:$!^\"#@\{\}\t\-\*/]', ' ', txt) # remove punctuations
+	txt = re.sub('_', ' ', txt) # replace under score with space
+	part = re.split(r'<(.*?)>', txt)
+
+	bkc, ovl=  [], []
+	flag, ln, cnt = True, '', 0
+
+	if len(part) == 1:
+		ln = re.sub(r'\s+', ' ', txt).strip().lower()
+
+	else:
+		for pt in part:
+			if flag:
+				pt = re.sub(r'\s+', ' ', pt).strip().lower()
+				ln = ln + pt + ' '
+				cnt += len(pt.split())
+			else:
+				if '|' not in pt:
+					pt = re.sub(r'\s+', ' ', pt).strip().lower()
+					ln = ln + pt + ' '
+					ptcnt = len(pt.split())
+					bkc.append((cnt, cnt + ptcnt))
+					cnt += ptcnt
+				else:
+					ptovl = pt.split('|')
+					aa = re.sub(r'\s+', ' ', ptovl[0]).strip().lower()
+					bb = re.sub(r'\s+', ' ', ptovl[1]).strip().lower()
+					ln = ln + aa + ' '
+					ptcnt = len(aa.split())
+					ovl.append((cnt, cnt + ptcnt, bb))
+					cnt += ptcnt
+
+			flag = not flag
+
+		ln = ' '.join(ln.split())
+
+	return ln, bkc, ovl
+
+
+#-------------Utils--------------------------#
+
+def pad(l, content, width):
+    
+    l.extend([content] * (width - len(l)))
+    return l
